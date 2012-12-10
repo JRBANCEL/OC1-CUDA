@@ -10,10 +10,11 @@ import pycuda.gpuarray as gpu
 from kNN import Classifier
 
 class DecisionTree():
-    def __init__(self, hyperplan, leftChild=None, rightChild=None):
-        self.leftChild = leftChild
-        self.rightChild = rightChild
-        self.hyperplan = hyperplan
+    def __init__(self):
+        self.leftChild = None
+        self.rightChild = None
+        self.hyperplan = None
+        self.leaf = False
 
 def cudaCompile(sourceString, functionName):
     sourceModule = nvcc.SourceModule(sourceString)
@@ -192,8 +193,10 @@ class ParallelOC1(Classifier):
         cat_d = gpu.to_gpu(cat)
 
         impurityKernel(cat_d, count_d, block=(c, 1, 1), grid=(1, 1, 1))
-        print "Count:", count_d.get()
-        return 1 - numpy.sum([x*x for x in count_d.get()])/float(cat.shape[0]**2)
+        count = count_d.get()
+        # This could be computed on the GPU but it is a really small computation
+        # I am not sure if it is worth it
+        return 1 - numpy.sum([x*x for x in count])/float(cat.shape[0]**2), count
 
 
     def trainClassifier(self, training_data):
@@ -211,16 +214,27 @@ class ParallelOC1(Classifier):
         # Initial split
         set1, set2, hyperplan, impurity = self.findHyperplan(samples, cat, c)
         print impurity, hyperplan
-        self.DT = DecisionTree(hyperplan)
-        self.length = 1
-        impurity1 = self.setImpurity(set1[1], c)
+        self.DT = DecisionTree()
+        self.DT.hyperplan = hyperplan[:-1]
+        self.length = 3
+        impurity1, count1 = self.setImpurity(set1[1], c)
         print "Impurity 1:", impurity1
         if impurity1 > p:
             queue.insert(0, (set1, self.DT, "L"))
-        impurity2 = self.setImpurity(set2[1], c)
+        else:
+            node = DecisionTree()
+            node.leaf = True
+            node.count = count1
+            self.DL.leftChild = node
+        impurity2, count2 = self.setImpurity(set2[1], c)
         print "Impurity 2:", impurity2
         if impurity2 > p:
             queue.insert(0, (set2, self.DT, "R"))
+        else:
+            node = DecisionTree()
+            node.leaf = True
+            node.count = count2
+            self.DT.rightChild = node
 
         while True:
             try:
@@ -234,46 +248,59 @@ class ParallelOC1(Classifier):
 
             set1, set2, hyperplan, impurity = self.findHyperplan(samples, cat, c)
             print hyperplan
-            node = DecisionTree(hyperplan)
+            node = DecisionTree()
+            node.hyperplan = hyperplan[:-1]
+
+            # Adding a link from the parent to the child
             if side == "L":
                 parent.leftChild = node
             else:
                 parent.rightChild = node
 
             # If the impurity is above the threshold, then split again
-            impurity1 = self.setImpurity(set1[1], c)
-            print "Impurity 1:", impurity1
-            if impurity1 > p:
+            impurity, count = self.setImpurity(set1[1], c)
+            print "Impurity 1:", impurity
+            if impurity > p:
                 queue.insert(0, (set1, node, "L"))
-            impurity2 = self.setImpurity(set2[1], c)
+            else:
+                child = DecisionTree()
+                child.leaf = True
+                child.count = count
+                node.leftChild = child
+            impurity, count = self.setImpurity(set2[1], c)
             print "Impurity 2:", impurity2
-            if impurity2 > p:
+            if impurity > p:
                 queue.insert(0, (set2, node, "R"))
+            else:
+                child = DecisionTree()
+                child.leaf = True
+                child.count = count
+                node.rightChild = child
             self.length += 2
 
         # Display tree
-        self.buildTree(d)
+        print "-"*30
+        self.displayTree()
+        print "-"*30
+        self.buildTree(d, c)
         print self.length
 
-    def buildTree(self, d):
+    def buildTree(self, d, c):
         """Build the tree in GPU memory"""
-        tree = numpy.zeros((self.length, 1), dtype=numpy.int32)
+        tree = numpy.zeros((self.length, max(d+1, c)+1), dtype=numpy.float64)
         current = 0
         next = 1
 
         queue = list([self.DT])
         while len(queue) > 0:
             node = queue.pop()
-            if node.leftChild != None:
-                tree[current] = next
+            if node.leaf:
+                tree[current][1:c+1] = node.count
+            else:
+                tree[current][0] = next
+                tree[current][1:d+2] = node.hyperplan
                 queue.insert(0, node.leftChild)
-            else:
-                tree[current] = -1
-            if node.rightChild != None:
                 queue.insert(0, node.rightChild)
-            else:
-                tree[current+1] = -1
-            if node.leftChild != None or node.rightChild != None:
                 next += 2
             current += 1
 
@@ -282,10 +309,11 @@ class ParallelOC1(Classifier):
         queue = list([self.DT])
         while len(queue) > 0:
             node = queue.pop()
-            print node.hyperplan
-            if node.leftChild != None:
+            if node.leaf:
+                print "Leaf:", node.count
+            else:
+                print "Hyperplan:", node.hyperplan
                 queue.insert(0, node.leftChild)
-            if node.rightChild != None:
                 queue.insert(0, node.rightChild)
 
     def classifyInstance(self,instance):
