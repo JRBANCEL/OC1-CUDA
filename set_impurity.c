@@ -1,5 +1,7 @@
 // Counting per category
 // Each thread is responsible of one category per split
+// I don't know if it would be faster using one thread per sample
+// and an atomicInc.
 __global__ void set_impurity1(unsigned int categories[$n],
                               unsigned int count[$c]) {
 
