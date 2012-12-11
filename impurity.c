@@ -8,9 +8,9 @@ __global__ void impurity1(double samples[$n][$d],
                           double hyperplan[$s][$d+2],
                           unsigned int position[$s][$n]) {
 
-    int t_x, t_y;   // Thread id
-    int i;          // Index variable
-    double point;   // Value of the point (above or below hyperplan)
+    int t_x, t_y;       // Thread id
+    int i;              // Index variable
+    double point = 0;   // Value of the point (above or below hyperplan)
 
     t_x = blockIdx.x * blockDim.x + threadIdx.x; // Indexes the samples
     t_y = blockIdx.y * blockDim.y + threadIdx.y; // Indexes the splits
@@ -20,7 +20,6 @@ __global__ void impurity1(double samples[$n][$d],
         // Check if the hyperplan is valid
         if(hyperplan[t_y][$d+1] > 0) {
             // Compute if the point is above or below the hyperplan
-            point = 0;
             for(i = 0 ; i < $d ; i++)
                 point += samples[t_x][i] * hyperplan[t_y][i];
             point += hyperplan[t_y][$d];
@@ -84,16 +83,15 @@ __global__ void impurity3(unsigned int count[$s][$c][2],
     tid = blockIdx.x * blockDim.x + threadIdx.x; // Indexes the splits
 
     if(tid < $s) {
-        if(count[tid][0][0] == 0 && count[tid][0][1] == 0) {
-            impurity[tid] = 10;
+        for(i = 1 ; i < $c ; i++) {
+            GiniL -= (count[tid][i][0] * count[tid][i][0])/(double)((Tl[tid])*(Tl[tid]));
+            GiniR -= (count[tid][i][1] * count[tid][i][1])/(double)(($n-Tl[tid])*($n-Tl[tid]));
         }
-        else {
-            for(i = 1 ; i < $c ; i++) {
-                GiniL -= (count[tid][i][0] * count[tid][i][0])/(double)((Tl[tid])*(Tl[tid]));
-                GiniR -= (count[tid][i][1] * count[tid][i][1])/(double)(($n-Tl[tid])*($n-Tl[tid]));
-            }
-            impurity[tid] = (Tl[tid] * GiniL + ($n-Tl[tid]) * GiniR)/((float)$n);
-        }
+        if(Tl[tid] == 0)
+            GiniL = 1;
+        if(Tl[tid] == $n)
+            GiniR = 1;
+        impurity[tid] = (Tl[tid] * GiniL + ($n-Tl[tid]) * GiniR)/((float)$n);
     }
 }
 
@@ -121,5 +119,4 @@ __global__ void impurity4(double U[$n],
         }
     }
 }
-
 
