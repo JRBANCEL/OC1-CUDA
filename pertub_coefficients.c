@@ -19,8 +19,8 @@ __global__ void perturb1(double samples[$n][$d],
         V = hyperplan[$d];
         for(i = 0 ; i < $d ; i++) {
             V += hyperplan[i] * samples[tid][i];
-            U[tid] = (hyperplan[m] * samples[tid][m] - V)/samples[tid][m];
         }
+        U[tid] = (hyperplan[m] * samples[tid][m] - V)/samples[tid][m];
     }
 }
 
