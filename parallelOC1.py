@@ -1,5 +1,7 @@
-import numpy
 import math
+import numpy
+import time
+import sys
 
 import Cheetah.Template
 
@@ -28,6 +30,9 @@ def loadSource(filename):
     return Cheetah.Template.Template(source)
 
 class ParallelOC1(Classifier):
+    def __init__(self):
+        self.isTrained = False
+
     def findHyperplan(self, samples, cat, c):
         n = samples.shape[0]
         d = samples.shape[1]
@@ -100,19 +105,28 @@ class ParallelOC1(Classifier):
         impurity3_d = gpu.to_gpu(impurity3)
 
         # Compute the splits on parallel axis
-        parallelSplitsKernel(samples_d, splits_d, block=(512/d, d, 1), grid=(n, 1, 1)) #XXX Fix gridsize
+        parallelSplitsKernel(samples_d, splits_d, block=(512/d, d, 1),
+                             grid=(n/(512/d)+1, 1, 1))
+#        print "Parallel Splits", splits_d.get()
 
         # Compute impurity of the splits
-        impurity1_1Kernel(samples_d, splits_d, position_d, block=(n, n*d, 1), grid=(1, 1, 1))
-        impurity2_1Kernel(cat_d, count_d, tl_d, position_d, block=(c+1, n*d, 1), grid=(1, 1, 1))
-        impurity3_1Kernel(count_d, tl_d, impurity_d, block=(n*d, 1, 1), grid=(1, 1, 1))
+        impurity1_1Kernel(samples_d, splits_d, position_d, block=(32, 32, 1),
+                          grid=(n/32+1, n*d/32+1, 1))
+#        print "Position", position_d.get()
+        impurity2_1Kernel(cat_d, count_d, tl_d, position_d,
+                          block=(c+1, 512/(c+1), 1),
+                          grid=(1, n*d/(512/(c+1))+1, 1))
+#        print "Counts", count_d.get(), tl_d.get()
+        impurity3_1Kernel(count_d, tl_d, impurity_d, block=(512, 1, 1),
+                          grid=(n*d/512+1, 1, 1))
 
         #TODO Implement that on GPU
         impurity = impurity_d.get()
+#        print "Impurity", impurity
         minimum = impurity[0]
         hyperplan = 0
         for index, imp in enumerate(impurity):
-            if imp < minimum:
+            if imp <= minimum:
                 hyperplan = index
                 minimum = imp
 
@@ -120,66 +134,92 @@ class ParallelOC1(Classifier):
         hyperplan_d = gpu.to_gpu(hyperplan)
 #        print "Best Parallel Split", hyperplan
 
-        # Perturb coefficients
-        U = numpy.zeros(n, dtype=numpy.float64)
-        U_d = gpu.to_gpu(U)
-        splits2 = numpy.zeros((n, 2), dtype=numpy.float64)
-        splits2_d = gpu.to_gpu(splits2)
-        for m in range(d):
-            perturbCoefficientsKernel1(samples_d, hyperplan_d, U_d, numpy.uint32(m),
-                                       block=(n, 1, 1), grid=(1, 1, 1))
-            perturbCoefficientsKernel2(U_d, splits2_d, block=(n, 1, 1), grid=(1, 1, 1))
+        R = 0
+        while R < 10:
+            # If not first round, pick a random hyperplan
+            if R > 0:
+                hyperplan = numpy.zeros(d+2, dtype=numpy.float64)
+                hyperplan[:d+1] = numpy.random.uniform(low=-1, high=1, size=d+1)
+                hyperplan[d+1] = 1
+                hyperplan_d = gpu.to_gpu(hyperplan)
 
-            impurity4_2Kernel(U_d, splits2_d, position2_d, block=(n, n, 1), grid=(1, 1, 1))
-            impurity2_2Kernel(cat_d, count2_d, tl2_d, position2_d, block=(c+1, n*d, 1), grid=(1, 1, 1))
-            impurity3_2Kernel(count2_d, tl2_d, impurity2_d, block=(n*d, 1, 1), grid=(1, 1, 1))
+            # Perturb coefficients
+            U = numpy.zeros(n, dtype=numpy.float64)
+            U_d = gpu.to_gpu(U)
+            splits2 = numpy.zeros((n, 2), dtype=numpy.float64)
+            splits2_d = gpu.to_gpu(splits2)
+            for m in range(d+1):
+#                print "Hyperlan", hyperplan
+                perturbCoefficientsKernel1(samples_d, hyperplan_d, U_d,
+                                           numpy.uint32(m),
+                                           block=(512, 1, 1), grid=(n/512+1, 1, 1))
+#                print "U_j", U_d.get()
+                perturbCoefficientsKernel2(U_d, splits2_d, block=(512, 1, 1),
+                                           grid=(n/512+1, 1, 1))
+#                print "Splits", splits2_d.get()
 
-            #TODO Implement that on GPU
-            impurity = impurity2_d.get()
-#            print splits2_d.get()
-#            print impurity
-            minimum = impurity[0]
-            split = 0
-            for index, imp in enumerate(impurity):
-                if imp <= minimum:
-                    split = index
-                    minimum = imp
-            bestSplit = splits2_d.get()[split]
-#            print "Best Split for feature %d is" % (m), bestSplit
+                impurity4_2Kernel(U_d, splits2_d, position2_d, block=(32, 32, 1),
+                                  grid=(n/32+1, n/32+1, 1))
+                impurity2_2Kernel(cat_d, count2_d, tl2_d, position2_d,
+                                  block=(c+1, 512/(c+1), 1), grid=(1, n*d/512+1, 1))
+                impurity3_2Kernel(count2_d, tl2_d, impurity2_d,
+                                  block=(512, 1, 1), grid=(n*d/512+1, 1, 1))
 
-            # Updating the hyperplan
-            H1 = hyperplan.copy()
-            H1[m] = bestSplit[0]
-            H2 = numpy.zeros((21, d+2), dtype=numpy.float64)
-            H2[0] = hyperplan
-            for alpha in range(1, 21):
-                H2[alpha] = H1
-                H2[alpha][d] *= alpha/10.
+                #TODO Implement that on GPU
+                impurity = impurity2_d.get()
+#                print splits2_d.get()
+#                print impurity
+                minimum = impurity[0]
+                split = 0
+                for index, imp in enumerate(impurity):
+                    if imp <= minimum:
+                        split = index
+                        minimum = imp
+                bestSplit = splits2_d.get()[split]
+#                print "Best Split for feature %d is" % (m), bestSplit
 
-            H_d = gpu.to_gpu(H2)
+                # Updating the hyperplan
+                H1 = hyperplan.copy()
+                H1[m] = bestSplit[0]
+                H2 = numpy.zeros((21, d+2), dtype=numpy.float64)
+                H2[0] = hyperplan
+                for alpha in range(1, 21):
+                    H2[alpha] = H1
+                    H2[alpha][d] *= alpha/5.
 
-            # Comparing impurity of the current hyperplan and H1
-            impurity1_3Kernel(samples_d, H_d, position3_d, block=(n, 21, 1), grid=(1, 1, 1))
-            impurity2_3Kernel(cat_d, count3_d, tl3_d, position3_d, block=(c+1, 21, 1), grid=(1, 1, 1))
-            impurity3_3Kernel(count3_d, tl3_d, impurity3_d, block=(21, 1, 1), grid=(1, 1, 1))
-            impurity3 = impurity3_d.get()
+                H_d = gpu.to_gpu(H2)
+#                print H2
 
-            #TODO Implement that on GPU
-            impurity = impurity3_d.get()
-            minimum = impurity[0]
-            split = 0
-            for index, imp in enumerate(impurity):
-                if imp < minimum:
-                    split = index
-                    minimum = imp
-            hyperplan_d = gpu.to_gpu(H2[split])
-#            print H2[split]
+                # Comparing impurity of the current hyperplan and H1
+                impurity1_3Kernel(samples_d, H_d, position3_d,
+                                  block=(24, 21, 1), grid=(n/24+1, 1, 1))
+                impurity2_3Kernel(cat_d, count3_d, tl3_d, position3_d,
+                                  block=(c+1, 21, 1), grid=(1, 1, 1))
+                impurity3_3Kernel(count3_d, tl3_d, impurity3_d,
+                                  block=(21, 1, 1), grid=(1, 1, 1))
+
+                #TODO Implement that on GPU
+                impurity = impurity3_d.get()
+                minimum = impurity[0]
+                split = 0
+                for index, imp in enumerate(impurity):
+                    if imp < minimum:
+                        split = index
+                        minimum = imp
+                if R == 0:
+                    bestHyperplan = H2[split]
+                    bestImpurity = minimum
+                    bestSieve = position3_d.get()[split]
+                elif imp < bestImpurity:
+                    bestHyperplan = H2[split]
+                    bestImpurity = minimum
+                    bestSieve = position3_d.get()[split]
+            R += 1
 
         # Compute the two sets of samples
-        sieve = position3_d.get()[split]
-        return (samples[sieve>0], cat[sieve>0]),\
-               (samples[sieve<1], cat[sieve<1]),\
-               H2[split], minimum
+        return (samples[bestSieve>0], cat[bestSieve>0]),\
+               (samples[bestSieve<1], cat[bestSieve<1]),\
+               bestHyperplan, bestImpurity
 
     def setImpurity(self, cat, c):
         """Compute the impurity of a set"""
@@ -205,29 +245,32 @@ class ParallelOC1(Classifier):
         # Samples array
         samples = numpy.array(training_data[:,:-1], dtype=numpy.float64)
         d = samples.shape[1]
-        c = 3
-        p = 0.1
+        # Number of category TODO compute it from the input
+        c = 4
+        # Impurity threshold
+        p = 0.4
 
         # List of sets waiting to be handled
         queue = list()
 
         # Initial split
         set1, set2, hyperplan, impurity = self.findHyperplan(samples, cat, c)
-        print impurity, hyperplan
+#        print "Set1: %d, Set2: %d, Impurity: %f, Hyperplan:" %\
+#              (len(set1[1]), len(set2[1]), impurity), hyperplan
         self.DT = DecisionTree()
         self.DT.hyperplan = hyperplan[:-1]
         self.length = 3
         impurity1, count1 = self.setImpurity(set1[1], c)
-        print "Impurity 1:", impurity1
+#        print "Impurity 1:", impurity1
         if impurity1 > p:
             queue.insert(0, (set1, self.DT, "L"))
         else:
             node = DecisionTree()
             node.leaf = True
             node.count = count1
-            self.DL.leftChild = node
+            self.DT.leftChild = node
         impurity2, count2 = self.setImpurity(set2[1], c)
-        print "Impurity 2:", impurity2
+#        print "Impurity 2:", impurity2
         if impurity2 > p:
             queue.insert(0, (set2, self.DT, "R"))
         else:
@@ -247,7 +290,9 @@ class ParallelOC1(Classifier):
                 break
 
             set1, set2, hyperplan, impurity = self.findHyperplan(samples, cat, c)
-            print hyperplan
+#            print hyperplan
+
+#            if len(set1[1]) > 0 and len(set2[1]) > 0:
             node = DecisionTree()
             node.hyperplan = hyperplan[:-1]
 
@@ -259,7 +304,7 @@ class ParallelOC1(Classifier):
 
             # If the impurity is above the threshold, then split again
             impurity, count = self.setImpurity(set1[1], c)
-            print "Impurity 1:", impurity
+#            print "Impurity 1:", impurity
             if impurity > p:
                 queue.insert(0, (set1, node, "L"))
             else:
@@ -268,7 +313,7 @@ class ParallelOC1(Classifier):
                 child.count = count
                 node.leftChild = child
             impurity, count = self.setImpurity(set2[1], c)
-            print "Impurity 2:", impurity2
+#            print "Impurity 2:", impurity2
             if impurity > p:
                 queue.insert(0, (set2, node, "R"))
             else:
@@ -278,15 +323,16 @@ class ParallelOC1(Classifier):
                 node.rightChild = child
             self.length += 2
 
-        # Display tree
-        print "-"*30
-        self.displayTree()
-        print "-"*30
-        self.buildTree(d, c)
-        print self.length
+        # Build and send the tree to GPU
+        # Note that the structure on the GPU doesn't need to have
+        # the probability distribution. In any case, a tree is small
+        # in memory so that it doesn't really matter
+        self.tree = self.buildTree(d, c)
+        self.tree_d = gpu.to_gpu(self.tree)
+        self.isTrained = True
 
     def buildTree(self, d, c):
-        """Build the tree in GPU memory"""
+        """Build the tree to be mapped in GPU memory"""
         tree = numpy.zeros((self.length, max(d+1, c)+1), dtype=numpy.float64)
         current = 0
         next = 1
@@ -304,7 +350,8 @@ class ParallelOC1(Classifier):
                 next += 2
             current += 1
 
-        print tree
+        return tree
+
     def displayTree(self):
         queue = list([self.DT])
         while len(queue) > 0:
@@ -316,23 +363,24 @@ class ParallelOC1(Classifier):
                 queue.insert(0, node.leftChild)
                 queue.insert(0, node.rightChild)
 
-    def classifyInstance(self,instance):
-    #takes a 1D numpy float array and returns a class
-        pass
-    def isTrained(self):
-    #boolean response of if the classifier is ready to be used
-        pass
+    def classifyInstance(self, samples):
+        n = samples.shape[0]
+        d = samples.shape[1]
+        classifySource = loadSource("classify.c")
+        classifySource.d = d
+        classifySource.n = n
+        classifySource.l = self.tree.shape[0]
+        classifySource.w = self.tree.shape[1]
+        classifyKernel = cudaCompile(str(classifySource), "classify1")
 
-if __name__ == "__main__":
-    sample = numpy.array([
-                        [1.1, 1, 0],
-                        [3, 3, 0],
-                        [1, 0, 1],
-                        [1.5, 0.1, 1],
-                        [2.5, 1.1, 1],
-                        [5, 2, 2],
-                        [6, 1, 2],
-                        [2, 6, 2]
-                         ])
-    classifier = ParallelOC1()
-    classifier.trainClassifier(sample)
+        categories = numpy.zeros(n, dtype=numpy.uint32)
+        categories_d = gpu.to_gpu(categories)
+        samples_d = gpu.to_gpu(samples)
+        classifyKernel(samples_d, self.tree_d, categories_d, block=(512, 1, 1),
+                       grid=(n/512 + 1, 1, 1))
+#        for index, cat in enumerate(categories_d.get()):
+#            print samples[index], "in category", self.tree[cat][1:]
+
+    def isTrained(self):
+        return self.isTrained
+
