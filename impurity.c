@@ -91,7 +91,7 @@ __global__ void impurity3(unsigned int count[$s][$c][2],
             GiniL = 1;
         if(Tl[tid] == $n)
             GiniR = 1;
-        impurity[tid] = (Tl[tid] * GiniL + ($n-Tl[tid]) * GiniR)/((float)$n);
+        impurity[tid] = (Tl[tid] * GiniL + ($n-Tl[tid]) * GiniR)/((double)$n);
     }
 }
 
