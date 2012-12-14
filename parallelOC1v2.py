@@ -118,7 +118,6 @@ class ParallelOC1(Classifier):
                 hyperplans[i][j] = numpy.random.uniform(low=-1, high=1, size=d+1)
 
         for m in range(d+1):
-            print '-'*20
             # Sending the hyperlans to the GPU
             hyperplans_d = gpu.to_gpu(hyperplans)
 
@@ -213,7 +212,6 @@ class ParallelOC1(Classifier):
         bestHyperplan = numpy.array(indexes[:,0])
         sieves = numpy.zeros((s, 2, n), dtype=numpy.uint32)
         sieves_d = gpu.to_gpu(sieves)
-#        print bestHyperplan
         bestHyperplan_d = gpu.to_gpu(bestHyperplan)
         sieveKernel(position_d, bestHyperplan_d, sieves_d, block=(1, 512, 1),
                     grid=(s, n/512+1, 1))
@@ -227,9 +225,7 @@ class ParallelOC1(Classifier):
                     grid=(c/32+1, s/16+1, 1))
         counts = counts_d.get()
         T = T_d.get()
-#        print "Counts", counts
         impurity = numpy.zeros((s, 2), dtype=numpy.float64)
-        print counts
         for i in range(s):
             for j in range(2):
                 impurity[i][j] = 1 - numpy.sum([x*x for x in counts[i][j]])/float(T[i][j]**2)
@@ -243,23 +239,25 @@ class ParallelOC1(Classifier):
                           (sieves[i][1], impurity[i][1], counts[i][1])))
         return output
 
-    def trainClassifier(self, training_data):
+    def trainClassifier(self, training_data, p=0.4):
         # Class array
         cat = numpy.array(training_data[:,-1], dtype=numpy.uint32)
         # Samples array
         samples = numpy.array(training_data[:,:-1], dtype=numpy.float64)
         n = samples.shape[0]
         d = samples.shape[1]
-        # Number of category TODO compute it from the input
-        c = 4
-        # Impurity threshold
-        p = 0.4
+
+        # Compute the number of categories
+        nbCat = set()
+        for c in cat:
+            nbCat.add(c)
+        c = len(nbCat)
+        self.c = c
 
         # Initial split
         hyperplan, (sieve1, impurity1, counts1), (sieve2, impurity2, counts2) =\
             self.findHyperplan(samples, cat, c, numpy.ones((1, n),
                                dtype=numpy.uint32))[0]
-        print sieve1, impurity1, sieve2, impurity2
         self.DT = DecisionTree()
         self.DT.hyperplan = hyperplan
         self.length = 3
@@ -286,8 +284,6 @@ class ParallelOC1(Classifier):
             sieve = numpy.zeros((s, n), dtype=numpy.uint32)
             for i in range(s):
                 sieve[i] = queue[i][0]
-            print "Sieve"
-            print sieve
 
             splits = self.findHyperplan(samples, cat, c, sieve)
 
@@ -295,10 +291,7 @@ class ParallelOC1(Classifier):
             # The ultimate goal is to write a kernel able to build the tree
             # structure instead of doing it on the CPU
             newQueue = list()
-            print '-'*20
-            print s
             for i, (hyperplan, (sieve1, impurity1, counts1), (sieve2, impurity2, counts2)) in enumerate(splits):
-                print impurity1, impurity2
                 node = DecisionTree()
                 node.hyperplan = hyperplan
                 if impurity1 > p:
@@ -380,8 +373,13 @@ class ParallelOC1(Classifier):
         samples_d = gpu.to_gpu(samples)
         classifyKernel(samples_d, self.tree_d, categories_d, block=(512, 1, 1),
                        grid=(n/512 + 1, 1, 1))
-#        for index, cat in enumerate(categories_d.get()):
-#            print samples[index], "in category", self.tree[cat][1:]
+
+        # Return the probability distribution (non normalized)
+        # of the sample
+        result = numpy.zeros((n, self.c), dtype=numpy.uint32)
+        for index, cat in enumerate(categories_d.get()):
+            result[index] = self.tree[cat][1:]
+        return result
 
     def isTrained(self):
         return self.isTrained

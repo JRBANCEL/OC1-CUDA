@@ -236,7 +236,7 @@ class ParallelOC1(Classifier):
 
         # Compute the number of categories
         nbCat = set()
-        for c in range(cat):
+        for c in cat:
             nbCat.add(c)
         c = len(nbCat)
 
@@ -363,7 +363,7 @@ class ParallelOC1(Classifier):
 
         # Return the probability distribution (non normalized)
         # of the sample
-        result = numpy.zeros((n, self.c), dtype=uint32)
+        result = numpy.zeros((n, self.c), dtype=numpy.uint32)
         for index, cat in enumerate(categories_d.get()):
             result[index] = self.tree[cat][1:]
         return result
