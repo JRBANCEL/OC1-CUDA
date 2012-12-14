@@ -33,11 +33,10 @@ class ParallelOC1(Classifier):
     def __init__(self):
         self.isTrained = False
 
-    def findHyperplan(self, samples, cat, c):
+    def findHyperplan(self, samples, cat, c, sieve, t=10):
         n = samples.shape[0]
         d = samples.shape[1]
-        s = 1
-        t = 3
+        s = sieve.shape[0]
 
         # Loading and compiling sources
         source = loadSource("parallel_build.c")
@@ -49,12 +48,17 @@ class ParallelOC1(Classifier):
         parallelSplitsKernel = cudaCompile(str(source), "parallel_splits")
         reduceImpurityKernel = cudaCompile(str(source), "reduce_impurity")
         source.t = t
+        reduceImpurityHyperplanKernel = cudaCompile(str(source), "reduce_impurity")
         computeUKernel = cudaCompile(str(source), "compute_U")
         computeImpurityUKernel = cudaCompile(str(source), "compute_impurity_U")
         reduceImpurityUKernel = cudaCompile(str(source), "reduce_impurity_U")
         initIndexUKernel = cudaCompile(str(source), "init_index_U")
         positionHyperplan = cudaCompile(str(source), "compute_position_hyperplans")
         countHyperplan = cudaCompile(str(source), "compute_count_hyperplans")
+        impurityHyperplanKernel = cudaCompile(str(source), "compute_impurity_hyperplans")
+        initIndexKernel = cudaCompile(str(source), "init_index_hyperplans")
+        sieveKernel = cudaCompile(str(source), "compute_sieves")
+        setImpurity = cudaCompile(str(source), "set_impurity")
 
         # Allocate memory
         impurity = numpy.ones((s, n*d), dtype=numpy.float64)
@@ -62,7 +66,6 @@ class ParallelOC1(Classifier):
         for i in range(s):
             index[i] = numpy.array(range(n*d), dtype=numpy.uint32)
         hyperplan = numpy.zeros((s, n*d, d+1), dtype=numpy.float64)
-        sieve = numpy.ones(n, dtype=numpy.uint32)
         U = numpy.zeros((s, t, n), dtype=numpy.float64)
         impurityU = numpy.zeros((s, t, n), dtype=numpy.float64)
         indexU = numpy.zeros((s, t, n), dtype=numpy.uint32)
@@ -71,6 +74,9 @@ class ParallelOC1(Classifier):
         countR = numpy.zeros((s, t, c),  dtype=numpy.uint32)
         Tl = numpy.zeros((s, t),  dtype=numpy.uint32)
         Tr = numpy.zeros((s, t),  dtype=numpy.uint32)
+        impurityHyperplan = numpy.zeros((s, t), dtype=numpy.float64)
+        indexHyperplan = numpy.zeros((s, t), dtype=numpy.uint32)
+        splits = numpy.zeros((s, t ,n), dtype=numpy.float64)
 
         samples_d = gpu.to_gpu(samples)
         cat_d = gpu.to_gpu(cat)
@@ -86,6 +92,9 @@ class ParallelOC1(Classifier):
         countR_d = gpu.to_gpu(countR)
         Tl_d = gpu.to_gpu(Tl)
         Tr_d = gpu.to_gpu(Tr)
+        impurityHyperplan_d = gpu.to_gpu(impurityHyperplan)
+        indexHyperplan_d = gpu.to_gpu(indexHyperplan)
+        splits_d = gpu.to_gpu(splits)
 
         # Compute the splits on parallel axis
         parallelSplitsKernel(samples_d, sieve_d, cat_d, hyperplan_d, impurity_d,
@@ -119,7 +128,7 @@ class ParallelOC1(Classifier):
 
 
             # Compute the impurity of U splits
-            computeImpurityUKernel(samples_d, sieve_d, cat_d, hyperplans_d,
+            computeImpurityUKernel(samples_d, sieve_d, cat_d, splits_d,
                                    impurityU_d ,U_d, block=(32, 16, 1),
                                    grid=(n/32+1, t/16+1, s))
 
@@ -135,150 +144,186 @@ class ParallelOC1(Classifier):
             # Compute the impurity of the initial hyperplans
             positionHyperplan(samples_d, sieve_d, hyperplans_d, position_d,
                              block=(1, 16, 32), grid=(s, t/16+1, n/32+1))
-            print cat
-            print position_d.get()
-            print "#"*10
+#            print "Position", position_d.get()
+#            print "#"*10
             countHyperplan(cat_d, position_d, countL_d, countR_d, Tl_d, Tr_d,
-                           block=(1, 32, 16), grid=(s, t/32+1, 16/c+2))
-            print Tl_d.get(), countL_d.get()
-            print Tr_d.get(), countR_d.get()
-#impurityHyperplan(
+                           block=(1, 32, 16), grid=(s, t/32+1, c/16+2))
+#            print Tl_d.get(), countL_d.get()
+#            print Tr_d.get(), countR_d.get()
+            impurityHyperplanKernel(countL_d, countR_d, Tl_d, Tr_d, impurityHyperplan_d,
+                              block=(1, 512, 1), grid=(s, t/512+1, 1))
+            impurityBefore = impurityHyperplan_d.get()
 
+            # Modify hyperplans with U and compute their impurity
+            modifiedHyperplans = hyperplans.copy()
+            splits = splits_d.get()
+            for i in range(s):
+                for j in range(t):
+                    modifiedHyperplans[i][j][m] = splits[i][j][indexU_d.get()[i][j][0]]
 
-        return
+            modifiedHyperplans_d = gpu.to_gpu(modifiedHyperplans)
+            positionHyperplan(samples_d, sieve_d, modifiedHyperplans_d, position_d,
+                             block=(1, 16, 32), grid=(s, t/16+1, n/32+1))
+#            print position_d.get()
+#            print "#"*10
+            countHyperplan(cat_d, position_d, countL_d, countR_d, Tl_d, Tr_d,
+                           block=(1, 32, 16), grid=(s, t/32+1, c/16+2))
+#            print Tl_d.get(), countL_d.get()
+#            print Tr_d.get(), countR_d.get()
+            impurityHyperplanKernel(countL_d, countR_d, Tl_d, Tr_d, impurityHyperplan_d,
+                              block=(1, 512, 1), grid=(s, t/512+1, 1))
+            impurityAfter = impurityHyperplan_d.get()
+#            print "Before", impurityBefore
+#            print "After", impurityAfter
 
-#                hyperplan = numpy.zeros(d+2, dtype=numpy.float64)
-#                hyperplan[:d+1] = numpy.random.uniform(low=-1, high=1, size=d+1)
-#                hyperplan[d+1] = 1
-#                hyperplan_d = gpu.to_gpu(hyperplan)
-#
-#                #TODO Implement that on GPU
-#                impurity = impurity3_d.get()
-#                minimum = impurity[0]
-#                split = 0
-#                for index, imp in enumerate(impurity):
-#                    if imp < minimum:
-#                        split = index
-#                        minimum = imp
-#                if R == 0:
-#                    bestHyperplan = H2[split]
-#                    bestImpurity = minimum
-#                    bestSieve = position3_d.get()[split]
-#                elif imp < bestImpurity:
-#                    bestHyperplan = H2[split]
-#                    bestImpurity = minimum
-#                    bestSieve = position3_d.get()[split]
-#            R += 1
+            # Choose the hyperplan with smallest impurity
+            for i in range(s):
+                for j in range(t):
+                    if impurityAfter[i][j] < impurityBefore[i][j]:
+                        hyperplans[i][j] = modifiedHyperplans[i][j]
 
-        # Compute the two sets of samples
-        return (samples[bestSieve>0], cat[bestSieve>0]),\
-               (samples[bestSieve<1], cat[bestSieve<1]),\
-               bestHyperplan, bestImpurity
+        # Find minimal impurity for every set
+        hyperplans_d = gpu.to_gpu(hyperplans)
+        positionHyperplan(samples_d, sieve_d, hyperplans_d, position_d,
+                         block=(1, 16, 32), grid=(s, t/16+1, n/32+1))
+#        print position_d.get()
+#        print "#"*10
+        countHyperplan(cat_d, position_d, countL_d, countR_d, Tl_d, Tr_d,
+                       block=(1, 32, 16), grid=(s, t/32+1, c/16+2))
+#        print Tl_d.get(), countL_d.get()
+#        print Tr_d.get(), countR_d.get()
+        impurityHyperplanKernel(countL_d, countR_d, Tl_d, Tr_d, impurityHyperplan_d,
+                          block=(1, 512, 1), grid=(s, t/512+1, 1))
+        initIndexKernel(indexHyperplan_d, block=(1, 512, 1),
+                        grid=(s, t/512+1, 1))
+#        print "Indexes", indexHyperplan_d
+#        print "Impurity", impurityHyperplan_d.get()
+        size = t
+        while size > 1:
+            reduceImpurityHyperplanKernel(impurityHyperplan_d, indexHyperplan_d,
+                                          numpy.uint32(size), block=(512, 1, 1),
+                                          grid=(t/512+1, s, 1))
+#            print size, "Indexes", indexHyperplan_d
+            size = math.ceil(size/2.)
+#        print "Hyperplans", hyperplans
+#        print "Indexes", indexHyperplan_d.get()
 
-    def setImpurity(self, cat, c):
-        """Compute the impurity of a set"""
-        impuritySource = loadSource("set_impurity.c")
-        impuritySource.c = c
-        impuritySource.n = cat.shape[0]
-        impurityKernel = cudaCompile(str(impuritySource), "set_impurity1")
+        # Compute sieves for each new set
+        indexes =  indexHyperplan_d.get()
+        bestHyperplan = numpy.array(indexes[:,0])
+        sieves = numpy.zeros((s, 2, n), dtype=numpy.uint32)
+        sieves_d = gpu.to_gpu(sieves)
+#        print bestHyperplan
+        bestHyperplan_d = gpu.to_gpu(bestHyperplan)
+        sieveKernel(position_d, bestHyperplan_d, sieves_d, block=(1, 512, 1),
+                    grid=(s, n/512+1, 1))
 
-        count = numpy.zeros(c, dtype=numpy.uint32)
-        count_d = gpu.to_gpu(count)
-        cat_d = gpu.to_gpu(cat)
+        # Compute impurity of new sets
+        counts = numpy.zeros((s, 2 , c), dtype=numpy.uint32)
+        counts_d = gpu.to_gpu(counts)
+        T = numpy.zeros((s, 2), dtype=numpy.uint32)
+        T_d = gpu.to_gpu(T)
+        setImpurity(cat_d, sieves_d, counts_d, T_d, block=(32, 16, 2),
+                    grid=(c/32+1, s/16+1, 1))
+        counts = counts_d.get()
+        T = T_d.get()
+#        print "Counts", counts
+        impurity = numpy.zeros((s, 2), dtype=numpy.float64)
+        print counts
+        for i in range(s):
+            for j in range(2):
+                impurity[i][j] = 1 - numpy.sum([x*x for x in counts[i][j]])/float(T[i][j]**2)
 
-        impurityKernel(cat_d, count_d, block=(c, 1, 1), grid=(1, 1, 1))
-        count = count_d.get()
-        # This could be computed on the GPU but it is a really small computation
-        # I am not sure if it is worth it
-        return 1 - numpy.sum([x*x for x in count])/float(cat.shape[0]**2), count
+        sieves = sieves_d.get()
 
+        output = list()
+        for i in range(s):
+            output.append((hyperplans[i][indexes[i][0]],
+                          (sieves[i][0], impurity[i][0], counts[i][0]),
+                          (sieves[i][1], impurity[i][1], counts[i][1])))
+        return output
 
     def trainClassifier(self, training_data):
         # Class array
         cat = numpy.array(training_data[:,-1], dtype=numpy.uint32)
         # Samples array
         samples = numpy.array(training_data[:,:-1], dtype=numpy.float64)
+        n = samples.shape[0]
         d = samples.shape[1]
         # Number of category TODO compute it from the input
         c = 4
         # Impurity threshold
         p = 0.4
 
-        self.findHyperplan(samples, cat, c)
-        return
-
-        # List of sets waiting to be handled
-        queue = list()
-
         # Initial split
-        set1, set2, hyperplan, impurity = self.findHyperplan(samples, cat, c)
-#        print "Set1: %d, Set2: %d, Impurity: %f, Hyperplan:" %\
-#              (len(set1[1]), len(set2[1]), impurity), hyperplan
+        hyperplan, (sieve1, impurity1, counts1), (sieve2, impurity2, counts2) =\
+            self.findHyperplan(samples, cat, c, numpy.ones((1, n),
+                               dtype=numpy.uint32))[0]
+        print sieve1, impurity1, sieve2, impurity2
         self.DT = DecisionTree()
-        self.DT.hyperplan = hyperplan[:-1]
+        self.DT.hyperplan = hyperplan
         self.length = 3
-        impurity1, count1 = self.setImpurity(set1[1], c)
-#        print "Impurity 1:", impurity1
+        queue = list()
         if impurity1 > p:
-            queue.insert(0, (set1, self.DT, "L"))
+            queue.append((sieve1, self.DT, "L"))
         else:
             node = DecisionTree()
             node.leaf = True
-            node.count = count1
+            node.count = counts1
             self.DT.leftChild = node
-        impurity2, count2 = self.setImpurity(set2[1], c)
-#        print "Impurity 2:", impurity2
         if impurity2 > p:
-            queue.insert(0, (set2, self.DT, "R"))
+            queue.append((sieve2, self.DT, "R"))
         else:
             node = DecisionTree()
             node.leaf = True
-            node.count = count2
+            node.count = counts2
             self.DT.rightChild = node
 
-        while True:
-            try:
-                subset = queue.pop()
-                samples = subset[0][0]
-                cat = subset[0][1]
-                parent = subset[1]
-                side = subset[2]
-            except:
-                break
+        while len(queue) > 0:
 
-            set1, set2, hyperplan, impurity = self.findHyperplan(samples, cat, c)
-#            print hyperplan
+            # Split all the sets in parallel
+            s = len(queue)
+            sieve = numpy.zeros((s, n), dtype=numpy.uint32)
+            for i in range(s):
+                sieve[i] = queue[i][0]
+            print "Sieve"
+            print sieve
 
-#            if len(set1[1]) > 0 and len(set2[1]) > 0:
-            node = DecisionTree()
-            node.hyperplan = hyperplan[:-1]
+            splits = self.findHyperplan(samples, cat, c, sieve)
 
-            # Adding a link from the parent to the child
-            if side == "L":
-                parent.leftChild = node
-            else:
-                parent.rightChild = node
+            # Browse results
+            # The ultimate goal is to write a kernel able to build the tree
+            # structure instead of doing it on the CPU
+            newQueue = list()
+            print '-'*20
+            print s
+            for i, (hyperplan, (sieve1, impurity1, counts1), (sieve2, impurity2, counts2)) in enumerate(splits):
+                print impurity1, impurity2
+                node = DecisionTree()
+                node.hyperplan = hyperplan
+                if impurity1 > p:
+                    newQueue.append((sieve1, node, "L"))
+                else:
+                    newNode = DecisionTree()
+                    newNode.leaf = True
+                    newNode.count = counts1
+                    node.leftChild = newNode
+                if impurity2 > p:
+                    newQueue.append((sieve2, node, "R"))
+                else:
+                    newNode = DecisionTree()
+                    newNode.leaf = True
+                    newNode.count = counts2
+                    node.rightChild = newNode
 
-            # If the impurity is above the threshold, then split again
-            impurity, count = self.setImpurity(set1[1], c)
-#            print "Impurity 1:", impurity
-            if impurity > p:
-                queue.insert(0, (set1, node, "L"))
-            else:
-                child = DecisionTree()
-                child.leaf = True
-                child.count = count
-                node.leftChild = child
-            impurity, count = self.setImpurity(set2[1], c)
-#            print "Impurity 2:", impurity2
-            if impurity > p:
-                queue.insert(0, (set2, node, "R"))
-            else:
-                child = DecisionTree()
-                child.leaf = True
-                child.count = count
-                node.rightChild = child
-            self.length += 2
+                # Adding a link from the parent to the child
+                if queue[i][2] == "L":
+                    queue[i][1].leftChild = node
+                else:
+                    queue[i][1].rightChild = node
+
+                self.length += 2
+            queue = newQueue
 
         # Build and send the tree to GPU
         # Note that the structure on the GPU doesn't need to have
