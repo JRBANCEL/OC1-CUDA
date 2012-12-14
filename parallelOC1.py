@@ -239,6 +239,7 @@ class ParallelOC1(Classifier):
         for c in cat:
             nbCat.add(c)
         c = len(nbCat)
+        self.c = c
 
         # List of sets waiting to be handled
         queue = list()

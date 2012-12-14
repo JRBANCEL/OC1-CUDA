@@ -80,7 +80,9 @@ def benchmark(n, p=0.4, plot=False, v2=True):
 if __name__ == "__main__":
     if len(sys.argv) < 4:
         print "Please RTFM before using this software"
-    elif int(sys.argv[1]) == 1:
+    elif int(sys.argv[3]) == 1:
+        print "Using Version 1"
         benchmark(int(sys.argv[1]), float(sys.argv[2]), plot=True, v2=False)
     else:
+        print "Using Version 2"
         benchmark(int(sys.argv[1]), float(sys.argv[2]), plot=True)
