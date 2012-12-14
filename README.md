@@ -18,6 +18,9 @@ Then the idea is to modify the coefficients of the hyperplan one after the other
 ### Differences between version 1 and 2
 The version one tests shifted versions of the currently perturbed hyperplan which leads to better results than just working on the original one. The version 2 doesn't do that for the moment but it is not a technical limitation, it is just that I had not the time to implement it.
 
+### Classification
+The classification algorithm is the same in both version. It is just a thread per sample than goes through the tree. I have to work on that because it is not as efficient as it should be. The problem is probably related to branching.
+
 ## First Version
 This version is implemented in the following files
 * parallelOC1.py
@@ -39,3 +42,5 @@ Choose which version of the algorithm to run: 1 or 2
 
 Then to run the benchmark:
 > python parallelOC1Benchmark.py number_of_points impurity_threshold version
+
+The decision tree will be displayed as a list of the hyperplans. The hyperplans are plotted. However, full lines are drawn. You need to check the order of the hyperplan to understand the plot.
