@@ -1,7 +1,11 @@
 import matplotlib.pyplot as plt
 import parallelOC1
+import parallelOC1v2
+import sys
+import numpy
+import time
 
-def benchmark(n, plot=False):
+def benchmark(n, p=0.4, plot=False, v2=True):
     """Generate a data set and run the training method on it"""
     samples = numpy.zeros((4*n, 3))
 
@@ -43,7 +47,11 @@ def benchmark(n, plot=False):
         if plot:
             ax.plot(x, y, "ko")
 
-    classifier = parallelOC1.ParallelOC1()
+    if v2:
+        classifier = parallelOC1v2.ParallelOC1()
+    else:
+        classifier = parallelOC1.ParallelOC1()
+
     start = time.time()
     classifier.trainClassifier(samples)
     print "Training Time:", time.time() - start
@@ -69,4 +77,9 @@ def benchmark(n, plot=False):
         plt.show()
 
 if __name__ == "__main__":
-    benchmark(int(sys.argv[1]), plot=True)
+    if len(sys.argv) < 4:
+        print "Please RTFM before using this software"
+    elif int(sys.argv[1]) == 1:
+        benchmark(int(sys.argv[1]), float(sys.argv[2]), plot=True, v2=False)
+    else:
+        benchmark(int(sys.argv[1]), float(sys.argv[2]), plot=True)
