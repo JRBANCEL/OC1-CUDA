@@ -53,7 +53,7 @@ def benchmark(n, p=0.4, plot=False, v2=True):
         classifier = parallelOC1.ParallelOC1()
 
     start = time.time()
-    classifier.trainClassifier(samples)
+    classifier.trainClassifier(samplesi, p)
     print "Training Time:", time.time() - start
     start = time.time()
     classifier.classifyInstance(samples)
@@ -62,6 +62,7 @@ def benchmark(n, p=0.4, plot=False, v2=True):
     # Drawing hyperplans - The result is minimal for the moment...
     if plot:
         queue = list([classifier.DT])
+        print "Tree Length:", classifier.length
         while len(queue) > 0:
             node = queue.pop()
             if not node.leaf:
