@@ -53,7 +53,7 @@ def benchmark(n, p=0.4, plot=False, v2=True):
         classifier = parallelOC1.ParallelOC1()
 
     start = time.time()
-    classifier.trainClassifier(samplesi, p)
+    classifier.trainClassifier(samples, p)
     print "Training Time:", time.time() - start
     start = time.time()
     classifier.classifyInstance(samples)
