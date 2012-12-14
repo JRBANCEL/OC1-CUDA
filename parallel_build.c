@@ -121,7 +121,7 @@ __global__ void compute_U(double samples[$n][$d],
 __global__ void compute_impurity_U(double samples[$n][$d],
                                    unsigned int sieve[$s][$n],
                                    unsigned int cat[$n],
-                                   double hyperplan[$s][$t][$d+1],
+                                   double splits[$s][$t][$n],
                                    double impurity[$s][$t][$n],
                                    double U[$s][$t][$n]) {
 
@@ -150,6 +150,7 @@ __global__ void compute_impurity_U(double samples[$n][$d],
         // If a next point was found, compute impurity of the split
         if(next != 1000000) {
             split = (U[t_z][t_y][t_x] + next)/2.0;
+            splits[t_z][t_y][t_x] = split;
             for(i = 0 ; i < $n ; i++) {
                 if(sieve[t_z][i] && U[t_z][t_y][i] > split) {
                     countL[cat[i]] += 1;
@@ -210,6 +211,15 @@ __global__ void init_index_U(unsigned int index[$s][$t][$n]) {
         index[t_y][t_z][t_x] = t_x;
 }
 
+// Just a kernel that initialiaze the memory correctly
+__global__ void init_index_hyperplans(unsigned int index[$s][$t]) {
+    int t_x = blockIdx.x * blockDim.x + threadIdx.x; // Indexes the sets
+    int t_y = blockIdx.y * blockDim.y + threadIdx.y; // Indexes the hyperplans
+
+    if(t_x < $s && t_y < $t)
+        index[t_x][t_y] = t_y;
+}
+
 // Compute the position of each sample compared to each hyperplan
 __global__ void compute_position_hyperplans(double samples[$n][$d],
                                             unsigned int sieve[$s][$n],
@@ -234,11 +244,11 @@ __global__ void compute_position_hyperplans(double samples[$n][$d],
                 position[t_x][t_y][t_z] = 1;
             }
             else {
-                position[t_x][t_y][t_z] = 2;
+                position[t_x][t_y][t_z] = 0;
             }
         }
         else {
-            position[t_x][t_y][t_z] = 0;
+            position[t_x][t_y][t_z] = 2;
         }
     }
 }
@@ -266,7 +276,7 @@ __global__ void compute_count_hyperplans(unsigned int cat[$n],
                 if(position[t_x][t_y][i] == 1)
                     countL[t_x][t_y][t_z] += 1;
                 else {
-                    if(position[t_x][t_y][i] == 2)
+                    if(position[t_x][t_y][i] == 0)
                         countR[t_x][t_y][t_z] += 1;
                 }
             }
@@ -283,9 +293,89 @@ __global__ void compute_count_hyperplans(unsigned int cat[$n],
                 Tl[t_x][t_y] += 1;
             }
             else {
-                if(position[t_x][t_y][i] == 2) {
+                if(position[t_x][t_y][i] == 0) {
                     Tr[t_x][t_y] += 1;
                 }
+            }
+        }
+    }
+}
+
+// Compute impurity using the result of the previous kernel. A reduction could
+// be used to compute the Gini score. However, the number of categories is
+// usually small: < 100.
+__global__ void compute_impurity_hyperplans(unsigned int countL[$s][$t][$c],
+                                            unsigned int countR[$s][$t][$c],
+                                            unsigned int Tl[$s][$t],
+                                            unsigned int Tr[$s][$t],
+                                            double impurity[$s][$t]) {
+
+    int t_x, t_y;
+    int i;
+    double GiniR = 1;
+    double GiniL = 1;
+
+    t_x = blockIdx.x * blockDim.x + threadIdx.x; // Indexes the sets
+    t_y = blockIdx.y * blockDim.y + threadIdx.y; // Indexes the hyperplans
+
+    if(t_x < $s && t_y < $t) {
+        for(i = 0 ; i < $c ; i++) {
+            GiniL -= (countL[t_x][t_y][i] * countL[t_x][t_y][i])/
+                     (double)(Tl[t_x][t_y] * Tl[t_x][t_y]);
+            GiniR -= (countR[t_x][t_y][i] * countR[t_x][t_y][i])/
+                     (double)(Tr[t_x][t_y] * Tr[t_x][t_y]);
+        }
+        // Deal with potential division by 0
+        if(Tl[t_x][t_y] == 0)
+            GiniL = 1;
+        if(Tr[t_x][t_y] == 0)
+            GiniR = 1;
+        impurity[t_x][t_y] = (Tl[t_x][t_y] * GiniL + Tr[t_x][t_y] * GiniR)/
+                             (double)(Tl[t_x][t_y] + Tr[t_x][t_y]);
+    }
+}
+
+// Derives two sieves from a position array for every hyperplan
+// selected in each set.
+__global__ void compute_sieves(unsigned int position[$s][$t][$n],
+                               unsigned int best_hyperplan[$s],
+                               unsigned int sieves[$s][2][$n]) {
+
+    int t_x, t_y;
+    t_x = blockIdx.x * blockDim.x + threadIdx.x; // Indexes the sets
+    t_y = blockIdx.y * blockDim.y + threadIdx.y; // Indexes the samples
+
+    if(t_x < $s && t_y < $n) {
+        if(position[t_x][best_hyperplan[t_x]][t_y] == 0) {
+            sieves[t_x][0][t_y] = 1;
+        }
+        else {
+            if(position[t_x][best_hyperplan[t_x]][t_y] == 1)
+                sieves[t_x][1][t_y] = 1;
+        }
+    }
+}
+
+// TODO implement this in two kernels like the computation of impurity
+// of hyperplans
+__global__ void set_impurity(unsigned int cat[$n],
+                             unsigned int sieves[$s][2][$n],
+                             unsigned int counts[$s][2][$c],
+                             unsigned int T[$s][2]) {
+
+    int t_x, t_y, t_z;
+    int i;
+
+    t_x = blockIdx.x * blockDim.x + threadIdx.x; // Indexes the categories
+    t_y = blockIdx.y * blockDim.y + threadIdx.y; // Indexes the sets
+    t_z = blockIdx.z * blockDim.z + threadIdx.z; // Indexes the side
+
+    if(t_x < $c && t_y < $s && t_z < 2) {
+        for(i = 0 ; i < $n ; i++) {
+            if(sieves[t_y][t_z][i] > 0) {
+                if(cat[i] == t_x)
+                    counts[t_y][t_z][t_x] += 1;
+                T[t_y][t_z] += 1;
             }
         }
     }
